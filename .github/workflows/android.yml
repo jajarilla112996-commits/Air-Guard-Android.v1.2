@@ -16,35 +16,134 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          echo "Repository files:"
+          find . -maxdepth 3 -type f | sort | head -200
+
+          PROJECT_SETTINGS=$(find . -type f \
+            \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+            | head -n 1)
+
+          if [ -z "$PROJECT_SETTINGS" ]; then
+            echo "No extracted Gradle project found. Looking for ZIP..."
+
+            ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" | head -n 1)
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "ERROR: No Android project or ZIP file found."
+              exit 1
+            fi
+
+            echo "ZIP found: $ZIP_FILE"
+
+            mkdir -p extracted
+            unzip -q "$ZIP_FILE" -d extracted
+
+            PROJECT_SETTINGS=$(find extracted -type f \
+              \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+              | head -n 1)
+
+            if [ -z "$PROJECT_SETTINGS" ]; then
+              echo "ERROR: No Gradle Android project found inside ZIP."
+              find extracted -maxdepth 5 -type f | sort
+              exit 1
+            fi
+          fi
+
+          PROJECT_DIR=$(dirname "$PROJECT_SETTINGS")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Android project found at: $PROJECT_DIR"
+
+          ls -la "$PROJECT_DIR"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK 35
+      - name: Install Android SDK packages
+        shell: bash
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Build Demo APK
+      - name: Show build environment
+        shell: bash
         run: |
-          gradle --no-daemon --stacktrace :app:assembleDebug
+          echo "PROJECT_DIR=$PROJECT_DIR"
+          java -version
+          gradle --version
 
-      - name: Upload APK
+          echo "Android project contents:"
+          ls -la "$PROJECT_DIR"
+
+          echo "App folder:"
+          ls -la "$PROJECT_DIR/app" || true
+
+      - name: Build Demo APK
+        shell: bash
+        run: |
+          set -o pipefail
+
+          cd "$PROJECT_DIR"
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            :app:assembleDebug \
+            2>&1 | tee build-error.log
+
+      - name: Upload build error log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirGuard-Build-Error-Log
+          path: ${{ env.PROJECT_DIR }}/build-error.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Find generated APK
+        if: success()
+        shell: bash
+        run: |
+          APK_FILE=$(find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f -name "*.apk" | head -n 1)
+
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "APK_FILE=$APK_FILE" >> "$GITHUB_ENV"
+
+          echo "Generated APK:"
+          ls -lh "$APK_FILE"
+
+      - name: Upload AirGuard APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: AirGuard-Teacher-Demo-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.APK_FILE }}
           if-no-files-found: error
           retention-days: 30
